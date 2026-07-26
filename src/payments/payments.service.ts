@@ -1,11 +1,19 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { envs } from '../config/envs';
 import { PaymentSessionDto } from './dto/payment-session.dto';
 import { StripeEvent } from '../fake-stripe/fake-stripe.types';
+import { NATS_SERVICE } from 'src/config/services';
+import { ClientProxy } from '@nestjs/microservices';
 
 @Injectable()
 export class PaymentsService {
+
+  constructor(
+    @Inject(NATS_SERVICE) private readonly client: ClientProxy
+  ) {
+
+  }
   /** Le pide la sesión al proveedor por HTTP. El día de mañana, a Stripe de verdad. */
   async createPaymentSession(dto: PaymentSessionDto) {
     const response = await fetch(`${envs.stripeApiUrl}/checkout/sessions`, {
