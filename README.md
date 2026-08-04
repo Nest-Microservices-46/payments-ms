@@ -1,98 +1,118 @@
+# 💳 Payments Microservice
+
 <p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
+  <img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" />
 </p>
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
-
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
+<p align="center">
+  Microservicio de Pagos, construido con <a href="http://nestjs.com/" target="blank">NestJS</a>. Crea las sesiones de pago y procesa los webhooks de confirmación.
 </p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
 
-## Description
+---
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+**Es el único servicio híbrido**: escucha HTTP *y* NATS al mismo tiempo.
 
-## Project setup
-
-```bash
-$ npm install
+```ts
+const app = await NestFactory.create(AppModule, { rawBody: true });
+app.connectMicroservice({ transport: Transport.NATS, ... });
+await app.startAllMicroservices();
 ```
 
-## Compile and run the project
+Necesita HTTP porque el webhook y la página de checkout son HTTP, y NATS porque `orders-ms` le habla por ahí. No tiene base de datos.
+
+## 📬 Message Patterns y rutas
+
+| | Patrón / Ruta | Hace |
+|---|---|---|
+| NATS | `create.payment.session` | Recibe `{ orderId, currency, items[] }` y devuelve `{ url, successUrl, cancelUrl }` |
+| HTTP | `POST /payments/webhook` | Confirmación de pago. Verifica la firma y emite el evento |
+| HTTP | `GET /payments/success` | Landing después de pagar |
+| HTTP | `GET /payments/cancel` | Landing si se cancela |
+
+Usa **strings con puntos** como patrón, igual que `auth-ms` y distinto de `products-ms` (objetos) y `orders-ms` (strings planos).
+
+## 🎭 Fake Stripe
+
+El servicio hospeda además un **reemplazo de la API de Stripe** (`src/fake-stripe/`), montado en `/v1/checkout`. No hace falta cuenta de Stripe ni claves reales para probar el flujo completo.
+
+| Ruta | Hace |
+|---|---|
+| `POST /v1/checkout/sessions` | Crea la sesión, como haría Stripe |
+| `GET /v1/checkout/pay/:id` | Página de pago |
+| `POST /v1/checkout/pay/:id/confirm` | Confirma y dispara el webhook |
+
+Ver [`FAKE-STRIPE.md`](./FAKE-STRIPE.md) para el detalle.
+
+## 🔄 El flujo completo
+
+1. `orders-ms` manda `create.payment.session` con los ítems. **Los precios viajan en unidades**; acá se multiplican por 100 para pasarlos a centavos.
+2. Este servicio le pide la sesión al fake Stripe por HTTP y devuelve `{ url, successUrl, cancelUrl }`.
+3. El usuario paga en esa `url`. El fake Stripe hace `POST` al webhook.
+4. La firma del webhook se verifica contra **`req.rawBody`** — de ahí el `rawBody: true` del bootstrap. Usar `JSON.stringify(req.body)` reespacia el JSON y rompe el HMAC.
+5. El webhook **emite** `payment.succeeded` con `emit()`, no con `send()`.
+
+> El punto 5 es una decisión, no un detalle: a Stripe solo le importa recibir su 200. Si esperáramos la respuesta de `orders-ms`, un `orders-ms` caído provocaría reintentos del webhook.
+
+## 📋 Requisitos Previos
+
+- **Node.js 22**
+- **npm** (este servicio usa npm, no pnpm)
+- **Docker** (para NATS, o para levantar todo el stack)
+
+## 🛠️ Instalación
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+cd payments-ms
+npm install
 ```
 
-## Run tests
+## ⚙️ Variables de Entorno
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+cp .env.template .env
 ```
 
-## Deployment
+```env
+PORT=3003
+NATS_SERVERS="nats://localhost:4222"
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+STRIPE_API_URL=http://localhost:3003/v1
+STRIPE_WEBHOOK_URL=http://localhost:3003/payments/webhook
+STRIPE_WEBHOOK_SECRET=whsec_fake_local_secret
+STRIPE_SUCCESS_URL=http://localhost:3003/payments/success
+STRIPE_CANCEL_URL=http://localhost:3003/payments/cancel
+```
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+> **Las cinco `STRIPE_*` son `required()`.** Si falta una, el contenedor compila, arranca y sale de inmediato. Bajo Docker llegan desde el `.env` de la raíz por interpolación `${...}`.
+
+A diferencia de los demás microservicios, acá `PORT` **sí se usa**: es el puerto HTTP real.
+
+## ▶️ Ejecución
+
+Lo normal es levantar todo el stack desde la raíz del proyecto:
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+docker compose up -d --build
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Solo, con NATS corriendo:
 
-## Resources
+```bash
+npm run start:dev
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+## 🧪 Testing
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+```bash
+npm test
+npm run test:e2e
+npm run test:cov
+```
 
-## Support
+## ⚠️ Cosas a tener en cuenta
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+**No tiene Prisma.** Su dockerfile empezó como una copia del de `orders-ms` y arrastraba un `RUN npx prisma generate` y la instalación de `openssl`; los dos se sacaron, porque un `prisma generate` sin directorio `prisma/` rompe el build.
 
-## Stay in touch
+**Las devDependencies tienen que quedar consistentes entre sí.** Venían con `jest@^25` al lado de `ts-jest@^29` (cuyo peer es `jest@^29`), `@nestjs/cli@^6.8.1` sobre una app de Nest 11, y `eslint@^10`. El lockfile se había generado con `--legacy-peer-deps`, así que solo fallaba dentro de Docker, en el `npm install`, con `npm error code ERESOLVE`. Ya están alineadas con `orders-ms`; si esa vuelta atrás reaparece, es lo primero para revisar.
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+**Es el que más sufre las fugas de hot reload.** Como sí bindea un puerto, un proceso huérfano de un recompilado anterior hace que el nuevo entre en crash-loop con `EADDRINUSE: address already in use :::3003`, y ahí deja de responder NATS por completo: `create.payment.session` empieza a fallar con `EmptyResponseException`. Está mitigado con `--no-shell` en el `start:dev`, pero si aparece, la salida es `docker compose restart payments-ms`.
